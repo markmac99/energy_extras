@@ -11,6 +11,6 @@ cd $here
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate openhabstuff
 
-python ./energyExtras.py keepupdated Anker_E5000_Load_Power
 python ./energyExtras.py keepupdated Anker_E5000_Battery_Power
 python ./energyExtras.py keepupdated Enphase_Envoy_Battery_Watts
+python ./energyExtras.py keepupdated Anker_E5000_PV_Power
