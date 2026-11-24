@@ -10,12 +10,21 @@ import logging
 import requests
 from requests.auth import HTTPBasicAuth 
 import pandas as pd
+import numpy as np
+import ssl
+from paho.mqtt.publish import multiple
+
+
+from mqConfig import readConfig
 
 log = logging.getLogger('octopus_misc')
 
 
 measurementlist = [ 'Anker_E5000_Load_Power', 'Anker_E5000_Battery_Power', 'Anker_E5000_Grid_Power', 'Anker_E5000_PV_Power',
     'Enphase_Envoy_Load_Watts', 'Enphase_Envoy_Battery_Watts', 'Enphase_Envoy_PV_Watts', 'Enphase_Envoy_Grid_Watts']
+
+minilist = ['Anker_E5000_Battery_Power', 'Anker_E5000_PV_Power', 'Enphase_Envoy_Battery_Watts',
+                 'Enphase_Envoy_PV_Watts', 'Enphase_Envoy_Grid_Watts']
 
 
 def getInfluxUrl():
@@ -171,18 +180,90 @@ def getAllData(startdate, enddate):
 
     """
 
-    anker_load = getResampledData('Anker_E5000_Load_Power',startdate,enddate, resample='10min')
-    anker_batt = getResampledData('Anker_E5000_Battery_Power',startdate,enddate, resample='10min')
-    anker_grid = getResampledData('Anker_E5000_Grid_Power',startdate,enddate, resample='10min')
-    anker_pvar = getResampledData('Anker_E5000_PV_Power',startdate,enddate, resample='10min')
-    envoy_load = getResampledData('Enphase_Envoy_Load_Watts',startdate,enddate, resample='10min')
-    envoy_batt = getResampledData('Enphase_Envoy_Battery_Watts',startdate,enddate, resample='10min')
-    envoy_pvar = getResampledData('Enphase_Envoy_PV_Watts',startdate,enddate, resample='10min')
-    envoy_grid = getResampledData('Enphase_Envoy_Grid_Watts',startdate,enddate, resample='10min')
-    fullset = pd.concat([anker_load, anker_batt, anker_pvar, anker_grid, envoy_load, envoy_batt, envoy_pvar, envoy_grid], axis=1)
+    vals = []
+    for meas in measurementlist:
+        vals.append(getResampledData(meas, startdate, enddate, resample='10min'))
+    fullset = pd.concat(vals, axis=1)
     fullset.fillna(0, inplace=True)
     return fullset
 
+
+def getConsumption(startdate, enddate):
+    """
+    Get true household consumption data. 
+
+    """
+    vals = []
+    for meas in minilist:
+        vals.append(getResampledData(meas, startdate, enddate, resample='10min'))
+    fullset = pd.concat(vals, axis=1)
+    fullset.fillna(0, inplace=True)
+    if hasattr(fullset, 'Anker_E5000_Battery_Power'):
+        fullset['total_batt'] = fullset.Anker_E5000_Battery_Power + fullset.Enphase_Envoy_Battery_Watts
+        if hasattr(fullset, 'Anker_E5000_PV_Power'):
+            fullset['total_pv'] = fullset.Anker_E5000_PV_Power + fullset.Enphase_Envoy_PV_Watts
+        else:
+            fullset['total_pv'] = fullset.Enphase_Envoy_PV_Watts
+        fullset['pos_batt']=np.where(fullset.total_batt <0,0,fullset.total_batt)
+        fullset['consumption'] = fullset.pos_batt + fullset.total_pv + fullset.Enphase_Envoy_Grid_Watts
+        if hasattr(fullset, 'Anker_E5000_PV_Power'):
+            newdf = fullset.drop(columns=['total_batt','total_pv','pos_batt','Anker_E5000_Battery_Power',
+                                    'Anker_E5000_PV_Power','Enphase_Envoy_Battery_Watts',
+                                    'Enphase_Envoy_PV_Watts','Enphase_Envoy_Grid_Watts'])
+        else:
+            newdf = fullset.drop(columns=['total_batt','total_pv','pos_batt','Anker_E5000_Battery_Power',
+                                    'Enphase_Envoy_Battery_Watts',
+                                    'Enphase_Envoy_PV_Watts','Enphase_Envoy_Grid_Watts'])
+
+    else:
+        fullset['total_batt'] = fullset.Enphase_Envoy_Battery_Watts
+        fullset['total_pv'] = fullset.Enphase_Envoy_PV_Watts
+        fullset['pos_batt']=np.where(fullset.total_batt <0,0,fullset.total_batt)
+        fullset['consumption'] = fullset.pos_batt + fullset.total_pv + fullset.Enphase_Envoy_Grid_Watts
+        newdf = fullset.drop(columns=['total_batt','total_pv','pos_batt','Enphase_Envoy_Battery_Watts',
+                                    'Enphase_Envoy_PV_Watts','Enphase_Envoy_Grid_Watts'])
+
+    newdf.reset_index(inplace=True)
+    for _,rw in newdf.iterrows():
+        tablename = 'HouseElectricityPower'
+        dt = rw.time
+        val = round(rw.consumption,1)
+        addToInflux(tablename, val, dt)
+
+    return newdf
+
+
+def getLatestConsumption():
+    log.info('connecting to MQ')
+    broker, mqport, username, passwd = readConfig()
+    topic  = 'house/electricity'
+    auth = {'username': username, 'password': passwd}
+    clientid = 'houseenergy'
+    if int(mqport) == 8883:
+        tls = {'ca_certs':None, 'cert_reqs':ssl.CERT_REQUIRED, 'tls_version':ssl.PROTOCOL_TLS}
+    else:
+        tls = None
+
+    log.info('getting data')
+    anker_batt = getLatestFromInflux(minilist[0], within='2h')
+    anker_pvar = getLatestFromInflux(minilist[1], within='2h')
+    envoy_batt = getLatestFromInflux(minilist[2], within='2h')
+    envoy_pvar = getLatestFromInflux(minilist[3], within='2h')
+    envoy_grid = getLatestFromInflux(minilist[4], within='2h')
+
+    anker_batt = 0 if not anker_batt else anker_batt['Anker_E5000_Battery_Power']
+    anker_pvar = 0 if not anker_pvar else anker_pvar['Anker_E5000_PV_Power']
+    envoy_batt = 0 if not envoy_batt else envoy_batt['Enphase_Envoy_Battery_Watts']
+    envoy_pvar = 0 if not envoy_pvar else envoy_pvar['Enphase_Envoy_PV_Watts']
+    envoy_grid = 0 if not envoy_grid else envoy_grid['Enphase_Envoy_Grid_Watts']
+        
+    consumption = max(0, anker_batt + envoy_batt) +(anker_pvar + envoy_pvar) + envoy_grid
+    consumption = round(consumption, 1)
+    msgs = []   
+    msgs.append((f'{topic}/HouseConsumption', consumption, 1))
+    log.info(msgs)
+    multiple(msgs=msgs, hostname=broker, port=int(mqport), client_id=clientid, keepalive=60, auth=auth, tls=tls)
+    log.info('done')
 
 if __name__ == '__main__':
 
@@ -191,9 +272,6 @@ if __name__ == '__main__':
     arg_parser.add_argument('item', metavar='ITEM', type=str, help='item to act on')
     cml_args = arg_parser.parse_args()
 
-    if cml_args.item not in measurementlist:
-        print('item must be one of ', measurementlist)
-        exit(0)
 
     logpath = os.path.expanduser('~/logs')
     os.makedirs(logpath, exist_ok=True)
@@ -214,5 +292,10 @@ if __name__ == '__main__':
 
     action = cml_args.action.lower()
     if action == 'keepupdated':
+        if cml_args.item not in measurementlist:
+            print('item must be one of ', measurementlist)
+            exit(0)
         log.info(f'keeping {cml_args.item} updated')
         keepTableUpdated(cml_args.item)
+    elif action == 'updatehousepower':
+        getLatestConsumption()
