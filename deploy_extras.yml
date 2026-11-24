@@ -1,0 +1,33 @@
+- hosts: ohserver
+  vars_files: 
+    - /mnt/c/Users/{{ lookup('env','USER' )}}/apikeys/mqvariables.enc
+  vars:
+    srcdir: "/mnt/c/Users/{{ lookup('env','USER' )}}/OneDrive/dev/tackley/energy/energy_extras"
+    targdir:  "{{ ansible_env.HOME }}/src/energy_extras"
+  environment: 
+    LD_LIBRARY_PATH: /usr/local/lib
+  tasks:
+
+  - name: Copy files
+    copy: src={{ item.src }} dest={{ item.dest }} mode={{ item.mode }}
+    with_items:
+    - {src: '{{srcdir}}/energyExtras.py', dest: '{{targdir}}/', mode: '644', backup: yes }
+    - {src: '{{srcdir}}/mqConfig.py.sample', dest: '{{targdir}}/mqConfig.py', mode: '644', backup: yes }
+    - {src: '{{srcdir}}/keepUpdated.sh', dest: '{{targdir}}/', mode: '744', backup: yes }
+    - {src: '{{srcdir}}/updateHousePower.sh', dest: '{{targdir}}/', mode: '744', backup: yes }
+
+  - name: update broker
+    ansible.builtin.replace:
+      path: '{{targdir}}/mqConfig.py'
+      regexp: "someserver.net"
+      replace: "metsatpi"
+  - name: update mquser
+    ansible.builtin.replace:
+      path: '{{targdir}}/mqConfig.py'
+      regexp: "mquser"
+      replace: "sensors"
+  - name: update mqpasswd
+    ansible.builtin.replace:
+      path: '{{targdir}}/mqConfig.py'
+      regexp: "mqpass"
+      replace: "{{ mqsenspassword }}"
